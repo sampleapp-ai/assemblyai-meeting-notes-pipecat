@@ -1,0 +1,5 @@
+pipecat-ai[assemblyai,cerebras,rime,silero,daily,webrtc]
+python-dotenv
+fastapi
+uvicorn
+openai
