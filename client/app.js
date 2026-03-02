@@ -48,10 +48,12 @@ async function connect() {
     // Show local video
     localVideo.srcObject = localStream;
 
+    // Fetch ICE servers (includes TURN if configured on server)
+    const iceRes = await fetch("/api/ice-servers");
+    const iceServers = await iceRes.json();
+
     // Create WebRTC peer connection
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
+    pc = new RTCPeerConnection({ iceServers });
 
     // Only add audio track to peer connection (video stays local-only)
     const audioTrack = localStream.getAudioTracks()[0];

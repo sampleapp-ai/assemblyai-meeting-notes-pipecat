@@ -116,6 +116,19 @@ def run_example_webrtc(
         )
     ]
 
+    # Add TURN server for production (WebRTC needs relay behind proxies like Fly.io)
+    turn_url = os.getenv("TURN_URL")
+    turn_username = os.getenv("TURN_USERNAME")
+    turn_credential = os.getenv("TURN_CREDENTIAL")
+    if turn_url:
+        ice_servers.append(
+            IceServer(
+                urls=turn_url,
+                username=turn_username or "",
+                credential=turn_credential or "",
+            )
+        )
+
     # Mount custom frontend from client/ directory
     client_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client")
     app.mount("/client", StaticFiles(directory=client_dir, html=True), name="client")
@@ -123,6 +136,17 @@ def run_example_webrtc(
     @app.get("/", include_in_schema=False)
     async def root_redirect():
         return RedirectResponse(url="/client/")
+
+    @app.get("/api/ice-servers")
+    async def get_ice_servers():
+        servers = [{"urls": "stun:stun.l.google.com:19302"}]
+        if turn_url:
+            servers.append({
+                "urls": turn_url,
+                "username": turn_username or "",
+                "credential": turn_credential or "",
+            })
+        return servers
 
     # WebSocket endpoint for streaming transcripts and notes to the frontend
     @app.websocket("/ws/transcripts")
