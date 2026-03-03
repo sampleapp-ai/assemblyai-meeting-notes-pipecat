@@ -1,231 +1,100 @@
----
-title: "Build a Meeting Notes Agent with Pipecat and AssemblyAI"
-description: "Build a listen-only meeting transcription agent using Pipecat's pipeline framework and AssemblyAI's Universal-3 Pro streaming STT that generates structured meeting notes."
----
+# Build a Meeting Notes App with Pipecat and AssemblyAI Universal-3 Pro
 
-## Overview
+Build a real-time meeting transcription and notes app using Pipecat's pipeline framework, AssemblyAI Universal-3 Pro streaming STT, Cerebras LLM, and Rime TTS. The AI facilitator joins meetings, transcribes speech in real time, participates in conversation, and generates structured meeting notes when the session ends.
 
-In this guide, you'll build a listen-only meeting transcription agent that captures speech in real time, displays a live transcript in the browser, and generates structured meeting notes when the session ends. Unlike a conversational voice agent, this is a passive listener — no TTS, no audio output. The agent uses AssemblyAI's Universal-3 Pro model for streaming transcription with balanced turn detection tuned for meeting cadence, then sends the full transcript to an LLM for structured note generation.
+<downloadandopenbuttons
+  downloadurl="/public/guardian/assemblyai/pipecat-meeting-notes.zip"
+  themecolor="#0000FF"
+/>
 
-### What you'll use
+### ❶ Install dependencies
 
-- **AssemblyAI Universal-3 Pro** — Streaming STT with punctuation-based turn detection
-- **Pipecat** — Pipeline framework for building voice and audio agents
-- **Cerebras** — LLM for generating structured meeting notes at session end
+<codefocussection filepath="requirements.txt" filerange="1-5" title="Python dependencies" themeColor="#0000FF" label="Server">
 
-### How it differs from a voice agent
-
-| | Voice Agent | Meeting Notes |
-|---|---|---|
-| Pipeline | Input → STT → LLM → TTS → Output | Input → STT → TranscriptCollector |
-| Audio output | Yes (TTS) | No — listen-only |
-| Frontend | Prebuilt Pipecat WebRTC UI | Custom UI with live transcript |
-| Data to client | Audio (WebRTC) | Transcript + notes (WebSocket) |
-| LLM usage | Real-time conversational responses | Post-session note generation |
-| Turn detection | Aggressive (100ms / 1200ms) | Balanced (560ms / 2000ms) |
-
-## Prerequisites
-
-To follow along, you'll need:
-
-- Python 3.10 or higher
-- An [AssemblyAI API key](https://www.assemblyai.com/dashboard/signup)
-- A [Cerebras API key](https://cloud.cerebras.ai/)
-
-## Project setup
-
-Create a new project directory and set up a virtual environment:
+Install Pipecat with plugins for each service: AssemblyAI for speech-to-text, Cerebras for the LLM, Rime for text-to-speech, Silero for voice activity detection, and WebRTC for browser-based audio transport. Also install `python-dotenv` for environment variables, `fastapi` and `uvicorn` for the HTTP server, and the `openai` client library for post-session LLM calls.
 
 ```bash
-mkdir meeting-notes && cd meeting-notes
-python -m venv .venv
-source .venv/bin/activate
+pip install "pipecat-ai[assemblyai,cerebras,rime,silero,daily,webrtc]" python-dotenv fastapi uvicorn openai
 ```
 
-Install the dependencies:
-
-```bash
-pip install "pipecat-ai[assemblyai,cerebras,silero,daily,webrtc]" python-dotenv fastapi uvicorn openai
-```
-
-Note that unlike the voice agent, there's no `rime` (TTS) or `pipecat-ai-small-webrtc-prebuilt` dependencies — this agent uses a custom frontend instead of the prebuilt UI.
-
-Create a `.env` file with your API keys:
-
-```env
-ASSEMBLYAI_API_KEY=your_assemblyai_api_key
-CEREBRAS_API_KEY=your_cerebras_api_key
-```
-
-Now create a `meeting_notes.py` file and follow along below.
-
-## Build the meeting notes agent
-
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="1-25"
-  title="Import dependencies and load environment"
-  themeColor="#0000FF"
-  label="Server"
->
-  Start by importing the Pipecat modules needed for the listen-only pipeline. Compared to the voice agent, notice what's missing: no `RimeTTSService`, no `OpenAILLMContext`, and no `CerebrasLLMService` in the pipeline. Instead, we import `TranscriptionFrame` and `InterimTranscriptionFrame` for our custom transcript collector, `FrameProcessor` as the base class, and `AsyncOpenAI` from the `openai` library to call Cerebras directly at session end (outside the pipeline).
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="27-38"
-  title="Configure transport options (listen-only)"
-  themeColor="#0000FF"
-  label="Server"
->
-  The transport configuration is similar to the voice agent but with one critical difference: **`audio_out_enabled=False`**. Since this is a listen-only agent with no TTS, there's no audio to send back. The agent only needs to receive audio input. Silero VAD is still used for voice activity detection to help manage the audio stream.
+### ❷ Configure API keys
+
+<codefocussection filepath=".env.example" filerange="1-3" title="Environment variables template" themeColor="#0000FF" label="Server">
+
+Create a `.env` file with your API keys. You'll need keys for [AssemblyAI](https://www.assemblyai.com/) (speech-to-text), [Cerebras](https://cloud.cerebras.ai/) (LLM), and [Rime](https://rime.ai/) (text-to-speech).
+
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="41-62"
-  title="Build the TranscriptCollector processor"
-  themeColor="#0000FF"
-  label="Server"
->
-  This is the key component that replaces the LLM/TTS/context aggregator chain from the voice agent. `TranscriptCollector` is a custom Pipecat processor that does two things:
+### ❸ Import libraries and load environment
 
-  1. **Finalized transcripts** (`TranscriptionFrame`) — Each completed turn is stored with a timestamp in `transcript_turns` for later note generation, and broadcast to the browser via WebSocket so it appears in the live transcript panel.
-  2. **Interim transcripts** (`InterimTranscriptionFrame`) — Partial results are broadcast to the browser so users can see words appearing in real time before the turn is finalized.
+<codefocussection filepath="meeting_notes.py" filerange="1-33" title="Import libraries and load environment" themeColor="#0000FF" label="Server">
 
-  The `broadcast` function imported from `run.py` sends JSON messages to all connected WebSocket clients.
+Import the Pipecat modules needed for the meeting notes pipeline: `TranscriptionFrame` and `InterimTranscriptionFrame` for transcript collection, `FrameProcessor` as the base class for custom processors, `OpenAILLMContext` for the conversational LLM pipeline, and `AsyncOpenAI` for calling Cerebras directly at session end. `load_dotenv()` pulls API keys from your `.env` file.
+
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="65-106"
-  title="Generate structured meeting notes with the LLM"
-  themeColor="#0000FF"
-  label="Server"
->
-  Unlike the voice agent where the LLM runs inside the pipeline for every turn, here the LLM is called **once** after the meeting ends. The function formats all collected transcript turns with timestamps, then sends them to Cerebras (`llama-3.3-70b`) via the OpenAI-compatible API. The system prompt instructs the LLM to produce structured notes with five sections: Summary, Key Discussion Points, Decisions Made, Action Items, and Next Steps. A lower temperature (0.3 vs 0.7 for the voice agent) is used for more focused, deterministic output.
+### ❹ Define agent persona and meeting notes prompt
+
+<codefocussection filepath="meeting_notes.py" filerange="35-72" title="Define agent persona and meeting notes prompt" themeColor="#0000FF" label="Server">
+
+Configure transport parameters for Daily and WebRTC with audio I/O enabled and Silero VAD. Define `SYSTEM_INSTRUCTIONS` for the AI facilitator's personality — it listens, asks clarifying questions, captures action items, and keeps responses concise for voice delivery. Define `MEETING_NOTES_PROMPT` to instruct the LLM to generate structured notes with five sections: Summary, Key Discussion Points, Decisions Made, Action Items, and Next Steps.
+
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="109-124"
-  title="Configure AssemblyAI Universal-3 Pro STT"
-  themeColor="#0000FF"
-  label="Server"
->
-  The STT configuration uses **balanced turn detection** tuned for meeting cadence rather than the aggressive settings used in the voice agent:
+### ❺ Build transcript processors
 
-  - **`min_end_of_turn_silence_when_confident=560`** — Waits 560ms of silence (vs 100ms in the voice agent) before checking for terminal punctuation. This gives meeting speakers time to pause between thoughts without prematurely splitting turns.
-  - **`max_turn_silence=2000`** — Allows up to 2 seconds of silence (vs 1.2s in the voice agent) before forcing a turn end. Meeting speakers often pause longer to think or reference materials.
-  - **`keyterms_prompt`** — Boosts recognition of meeting-specific vocabulary: participant names, project names, and common meeting terminology.
+<codefocussection filepath="meeting_notes.py" filerange="75-123" title="Build transcript processors" themeColor="#0000FF" label="Server">
+
+Two custom Pipecat processors handle transcript collection. `TranscriptCollector` stores finalized user transcripts with timestamps for later note generation and broadcasts them to the browser via WebSocket, while also forwarding interim results so users see words appearing in real time. `AgentResponseCollector` buffers the AI facilitator's `TextFrame` chunks until the response is complete, then stores and broadcasts the full response as a transcript turn.
+
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="126-140"
-  title="Assemble the listen-only pipeline"
-  themeColor="#0000FF"
-  label="Server"
->
-  This is the most visually striking difference from the voice agent. The full voice agent pipeline has 7 stages (`input → STT → context.user() → LLM → TTS → output → context.assistant()`), while the meeting notes pipeline has just 3: **`transport.input() → stt → transcript_collector`**. Audio comes in, gets transcribed, and the transcripts are buffered and broadcast. No LLM processing, no TTS, no audio output. The `allow_interruptions=False` parameter is set since there's nothing to interrupt.
+### ❻ Generate meeting notes with the LLM
+
+<codefocussection filepath="meeting_notes.py" filerange="126-157" title="Generate meeting notes with the LLM" themeColor="#0000FF" label="Server">
+
+Called once after the meeting ends rather than during the pipeline. Formats all collected transcript turns (both user and agent) with timestamps, then sends them to Cerebras (`llama3.1-8b`) via the OpenAI-compatible API with a lower temperature (0.3) for focused, deterministic output. Returns the structured notes for broadcasting to the client.
+
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="142-153"
-  title="Handle client connection events"
-  themeColor="#0000FF"
-  label="Server"
->
-  On connect, the agent just logs that it's listening — no proactive greeting since there's no TTS output. The important logic is in `on_client_disconnected`: when the user clicks "End Meeting", the WebRTC connection closes, triggering this handler. It calls `generate_meeting_notes()` with all collected transcript turns, then broadcasts the generated notes back to the browser via WebSocket so they render in the meeting notes panel.
+### ❼ Configure STT, LLM, TTS, and assemble the pipeline
+
+<codefocussection filepath="meeting_notes.py" filerange="160-217" title="Configure services and assemble pipeline" themeColor="#0000FF" label="Server">
+
+Set up AssemblyAI U3P with balanced turn detection — `min_end_of_turn_silence_when_confident=560` and `max_turn_silence=2000` accommodate natural meeting speech patterns where speakers pause to think. Configure Rime TTS (`mistv2` model, `astra` voice) and Cerebras LLM (`llama3.1-8b`, temperature 0.7). Assemble the full 9-stage pipeline: `input → STT → transcript_collector → context.user() → LLM → agent_response_collector → TTS → output → context.assistant()`.
+
 </codefocussection>
 
-<codefocussection
-  filepath="meeting_notes.py"
-  filerange="155-162"
-  title="Run the agent"
-  themeColor="#0000FF"
-  label="Server"
->
-  The runner setup is identical to the voice agent. The `PipelineRunner` manages the async event loop and the `__main__` block uses the run helper, which sets up the WebRTC transport, WebSocket endpoint for transcript streaming, and starts a FastAPI server with the custom frontend at `localhost:7860`.
+### ❽ Handle connection events and run
+
+<codefocussection filepath="meeting_notes.py" filerange="219-248" title="Handle connection events and run" themeColor="#0000FF" label="Server">
+
+On connect, the agent generates an initial greeting introducing itself as an AI meeting facilitator. On disconnect (when the user clicks "End Meeting"), `generate_meeting_notes()` is called with all collected transcript turns, and the structured notes are broadcast back to the browser via WebSocket. The `__main__` block uses the run helper from `run.py`, which sets up WebRTC transport, WebSocket endpoint, and a FastAPI server with the custom frontend.
+
 </codefocussection>
 
-## The custom frontend
+### ❾ Build the WebRTC connection with trickle ICE
 
-The meeting notes agent uses a custom browser-based UI instead of Pipecat's prebuilt WebRTC widget. The frontend handles two connections:
+<codefocussection filepath="client/app.js" filerange="38-160" title="WebRTC connection with trickle ICE" themeColor="#22C55E" label="Client">
 
-1. **WebRTC** — Sends microphone audio to the Pipecat pipeline on the server
-2. **WebSocket** — Receives live transcript updates and generated meeting notes from the server
+Establish a WebRTC peer connection using the offer/answer exchange with the Pipecat backend (`POST /start` then `POST /sessions/{id}/api/offer`), sending only the audio track while keeping video local-only. The offer is sent immediately after `setLocalDescription()` without waiting for ICE gathering — critical for production behind proxies where gathering may never complete. ICE candidates are trickled individually via `PATCH` requests, and a 30-second timeout resets the UI if the connection fails. A WebSocket to `/ws/transcripts` receives real-time transcript updates and generated notes.
 
-<codefocussection
-  filepath="client/app.js"
-  filerange="1-11"
-  title="Client state management"
-  themeColor="#22C55E"
-  label="Client"
->
-  The client tracks the WebRTC peer connection, media stream, WebSocket connection, session ID, and UI state like the meeting duration timer and turn count. These are module-level variables that persist across connect/disconnect cycles.
 </codefocussection>
 
-<codefocussection
-  filepath="client/app.js"
-  filerange="33-97"
-  title="Connect: WebRTC audio + WebSocket transcripts"
-  themeColor="#22C55E"
-  label="Client"
->
-  The `connect()` function establishes two connections. First, it gets microphone access and creates a WebRTC peer connection using the standard offer/answer exchange with the Pipecat backend (`POST /start` → `POST /sessions/{id}/api/offer`). This sends audio to the server for transcription. Then it opens a WebSocket to `/ws/transcripts` to receive real-time transcript updates and generated notes. The ICE gathering waits for completion before sending the offer to ensure all candidates are included.
+### ❿ Handle messages and end meeting
+
+<codefocussection filepath="client/app.js" filerange="210-314" title="Handle messages and end meeting" themeColor="#22C55E" label="Client">
+
+The WebSocket message handler routes three types: `transcript` (finalized turns added to the scrolling panel), `partial` (interim results shown in the caption bar), and `notes` (generated markdown rendered with the `marked` library). When the user clicks "End Meeting", the WebRTC connection closes (triggering server-side note generation) while the WebSocket stays open to receive the generated notes.
+
 </codefocussection>
 
-<codefocussection
-  filepath="client/app.js"
-  filerange="99-121"
-  title="Disconnect: close audio, keep WebSocket for notes"
-  themeColor="#22C55E"
-  label="Client"
->
-  When the user clicks "End Meeting", the WebRTC connection is closed (stopping the microphone and audio stream), which triggers `on_client_disconnected` on the server. The **WebSocket stays open** — this is critical because the server needs to send the generated meeting notes back after the LLM call completes. The notes panel is shown with a loading state while waiting.
-</codefocussection>
-
-<codefocussection
-  filepath="client/app.js"
-  filerange="123-153"
-  title="Handle incoming transcript and notes data"
-  themeColor="#22C55E"
-  label="Client"
->
-  The WebSocket message handler routes three message types: `transcript` (finalized turns — added to the scrolling transcript panel), `partial` (interim results — shown as dimmed italic text that updates in place), and `notes` (the generated meeting notes markdown, rendered using the `marked` library). When notes arrive, the WebSocket is closed since the session is complete.
-</codefocussection>
-
-## Run the agent
-
-Start the meeting notes agent:
+### ⓫ Run the agent
 
 ```bash
 python meeting_notes.py
 ```
 
-Open [http://localhost:7860](http://localhost:7860) in your browser, click **Start Meeting**, and begin your meeting. You'll see transcript turns appear in real time. Click **End Meeting** to generate structured notes — they'll appear in a formatted panel below the transcript.
-
-## How turn detection works
-
-AssemblyAI's Universal-3 Pro uses punctuation-based turn detection. For the meeting notes agent, we use balanced settings that accommodate meeting speech patterns:
-
-1. You speak, and audio streams to AssemblyAI in real time
-2. When you pause for 560ms (`min_end_of_turn_silence_when_confident`), the model checks if the transcript ends with terminal punctuation (`.` `?` `!`)
-3. If terminal punctuation is found, the turn ends and the transcript is added to the buffer and displayed in the browser
-4. If no terminal punctuation, a partial transcript is emitted and shown as interim text
-5. If silence reaches 2000ms (`max_turn_silence`), the turn is forced to end regardless
-
-The higher thresholds (560ms/2000ms vs 100ms/1200ms for the voice agent) mean the model is more patient with meeting speakers, producing cleaner and more complete transcript turns.
-
-## Speaker diarization
-
-Speaker diarization is not currently available in AssemblyAI's streaming API. For speaker-labeled meeting notes, use a hybrid approach: stream during the meeting for live transcription, then process the recording through the [async API](https://www.assemblyai.com/docs) for speaker-diarized, summarized notes.
-
-## Next steps
-
-- **Update keyterms mid-meeting**: Use `UpdateConfiguration` to add new `keyterms_prompt` terms as new topics arise during the meeting
-- **Save notes to file**: Extend `generate_meeting_notes()` to write the output to a markdown file
-- **Hybrid diarization**: Record the meeting audio and process it through AssemblyAI's async API for speaker-labeled notes
-- **Swap the LLM**: Replace Cerebras with OpenAI, Anthropic, or any other LLM via the OpenAI-compatible API
+Open [http://localhost:7860](http://localhost:7860), click **Start Meeting**, and begin your meeting. The AI facilitator will greet you and participate in conversation while transcribing everything in real time. Click **End Meeting** to generate structured notes.

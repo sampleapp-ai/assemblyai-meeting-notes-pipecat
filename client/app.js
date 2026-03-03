@@ -3,6 +3,7 @@ let pc = null;
 let localStream = null;
 let ws = null;
 let sessionId = null;
+let pcId = null;
 let connected = false;
 let startTime = null;
 let durationInterval = null;
@@ -68,19 +69,9 @@ async function connect() {
       setupAudioAnalysis(remoteStream);
     };
 
-    // Create SDP offer
+    // Create SDP offer and send immediately (don't wait for ICE gathering)
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-
-    // Wait for ICE gathering
-    await new Promise((resolve) => {
-      if (pc.iceGatheringState === "complete") resolve();
-      else {
-        pc.addEventListener("icegatheringstatechange", () => {
-          if (pc.iceGatheringState === "complete") resolve();
-        });
-      }
-    });
 
     // Start session
     const startRes = await fetch("/start", { method: "POST" });
@@ -97,17 +88,61 @@ async function connect() {
       }),
     });
     const answer = await offerRes.json();
+    pcId = answer.pc_id;
 
     // Set remote description
     await pc.setRemoteDescription(
       new RTCSessionDescription({ sdp: answer.sdp, type: answer.type })
     );
 
+    // Trickle ICE — send each candidate to the server as it's discovered
+    pc.onicecandidate = async (event) => {
+      if (event.candidate) {
+        try {
+          await fetch(`/sessions/${sessionId}/api/offer`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              pc_id: pcId,
+              candidates: [
+                {
+                  candidate: event.candidate.candidate,
+                  sdpMid: event.candidate.sdpMid,
+                  sdpMLineIndex: event.candidate.sdpMLineIndex,
+                },
+              ],
+            }),
+          });
+        } catch (err) {
+          console.warn("Failed to send ICE candidate:", err);
+        }
+      }
+    };
+
     // Connect WebSocket for transcript streaming
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${wsProtocol}//${location.host}/ws/transcripts`);
     ws.onmessage = handleMessage;
     ws.onclose = () => console.log("WebSocket closed");
+
+    // 30-second timeout — reset UI if WebRTC never connects
+    const connectTimeout = setTimeout(() => {
+      if (pc && pc.connectionState !== "connected") {
+        console.error("Connection timed out after 30s");
+        cleanup();
+        startBtn.disabled = false;
+        startBtn.textContent = "Start Meeting";
+        preConnect.classList.remove("hidden");
+        meetingEl.classList.add("hidden");
+        alert("Connection timed out. Please try again.");
+      }
+    }, 30000);
+
+    pc.onconnectionstatechange = () => {
+      if (pc && pc.connectionState === "connected") {
+        clearTimeout(connectTimeout);
+      }
+    };
 
     // Switch to meeting view
     connected = true;

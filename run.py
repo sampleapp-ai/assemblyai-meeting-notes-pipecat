@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from aiortc.sdp import candidate_from_sdp
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.network.fastapi_websocket import (
@@ -208,7 +209,10 @@ def run_example_webrtc(
             logger.error(f"No connection found for session {session_id}")
             return {"error": "No connection found"}
 
-        for candidate in candidates:
+        for c in candidates:
+            candidate = candidate_from_sdp(c["candidate"])
+            candidate.sdpMid = c.get("sdpMid")
+            candidate.sdpMLineIndex = c.get("sdpMLineIndex")
             await pipecat_connection.add_ice_candidate(candidate)
 
         return {"status": "ok"}
