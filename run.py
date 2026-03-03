@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2024–2025, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 import argparse
 import asyncio
 import json
@@ -14,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Mapping, Optional
 
 import aiohttp
+import time as _time
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
@@ -25,13 +20,13 @@ from loguru import logger
 from aiortc.sdp import candidate_from_sdp
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.network.fastapi_websocket import (
+from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
-from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
-from pipecat.transports.network.webrtc_connection import IceServer, SmallWebRTCConnection
-from pipecat.transports.services.daily import DailyParams, DailyTransport
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
 
 # Load environment variables
 load_dotenv(override=True)
@@ -84,19 +79,103 @@ def run_example_daily(
     args: argparse.Namespace,
     params: DailyParams,
 ):
-    logger.info("Running example with DailyTransport...")
+    logger.info("Running example with DailyTransport (web server mode)...")
 
-    from pipecat.examples.daily_runner import configure
+    app = FastAPI()
 
-    async def run():
+    daily_api_key = os.getenv("DAILY_API_KEY")
+    if not daily_api_key:
+        logger.error("DAILY_API_KEY environment variable is required for daily transport")
+        return
+
+    client_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client")
+    app.mount("/client", StaticFiles(directory=client_dir, html=True), name="client")
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/client/")
+
+    @app.websocket("/ws/transcripts")
+    async def transcript_ws(websocket: WebSocket):
+        await websocket.accept()
+        _websocket_clients.add(websocket)
+        logger.info("Transcript WebSocket client connected")
+        try:
+            while True:
+                await websocket.receive_text()
+        except Exception:
+            pass
+        finally:
+            _websocket_clients.discard(websocket)
+            logger.info("Transcript WebSocket client disconnected")
+
+    @app.post("/api/create-room")
+    async def create_room(background_tasks: BackgroundTasks):
         async with aiohttp.ClientSession() as session:
-            (room_url, token) = await configure(session)
+            # Create a Daily room
+            async with session.post(
+                "https://api.daily.co/v1/rooms",
+                headers={"Authorization": f"Bearer {daily_api_key}"},
+                json={
+                    "properties": {
+                        "exp": int(_time.time()) + 3600,
+                        "enable_chat": False,
+                        "start_video_off": True,
+                    }
+                },
+            ) as resp:
+                if resp.status != 200:
+                    error = await resp.text()
+                    logger.error(f"Failed to create Daily room: {error}")
+                    return {"error": "Failed to create room"}
+                room_data = await resp.json()
 
-            # Run example function with DailyTransport transport arguments.
-            transport = DailyTransport(room_url, token, "Pipecat", params=params)
-            await run_example(transport, args, True)
+            room_url = room_data["url"]
+            room_name = room_data["name"]
+            logger.info(f"Created Daily room: {room_url}")
 
-    asyncio.run(run())
+            # Create a user token
+            async with session.post(
+                "https://api.daily.co/v1/meeting-tokens",
+                headers={"Authorization": f"Bearer {daily_api_key}"},
+                json={
+                    "properties": {
+                        "room_name": room_name,
+                        "is_owner": False,
+                    }
+                },
+            ) as resp:
+                if resp.status != 200:
+                    error = await resp.text()
+                    logger.error(f"Failed to create Daily token: {error}")
+                    return {"error": "Failed to create token"}
+                token_data = await resp.json()
+
+            user_token = token_data["token"]
+
+            # Create a bot token and start the pipeline in the background
+            async with session.post(
+                "https://api.daily.co/v1/meeting-tokens",
+                headers={"Authorization": f"Bearer {daily_api_key}"},
+                json={
+                    "properties": {
+                        "room_name": room_name,
+                        "is_owner": True,
+                    }
+                },
+            ) as resp:
+                bot_token_data = await resp.json()
+                bot_token = bot_token_data["token"]
+
+        async def start_bot():
+            transport = DailyTransport(room_url, bot_token, "Meeting Notes Bot", params=params)
+            await run_example(transport, args, False)
+
+        background_tasks.add_task(start_bot)
+
+        return {"room_url": room_url, "token": user_token}
+
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 def run_example_webrtc(
@@ -355,7 +434,7 @@ def main(
         "-t",
         type=str,
         choices=["daily", "webrtc", "twilio"],
-        default="webrtc",
+        default="daily",
         help="The transport this example should use",
     )
     parser.add_argument(

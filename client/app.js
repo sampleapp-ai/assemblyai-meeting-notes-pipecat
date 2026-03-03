@@ -1,19 +1,17 @@
 // State
-let pc = null;
+let callObject = null;
 let localStream = null;
 let ws = null;
-let sessionId = null;
-let pcId = null;
 let connected = false;
 let startTime = null;
 let durationInterval = null;
 let micEnabled = true;
 let camEnabled = true;
 
-// Audio analysis for orb
-let audioCtx = null;
-let analyser = null;
-let animFrame = null;
+// Transcript segment merging
+const MERGE_WINDOW_MS = 3000;
+let lastRow = null;
+let mergeTimer = null;
 
 // DOM elements
 const preConnect = document.getElementById("pre-connect");
@@ -40,109 +38,42 @@ async function connect() {
   startBtn.textContent = "Connecting...";
 
   try {
-    // Get mic + camera
+    // Get local camera stream for preview (Daily handles mic audio separately)
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
       video: { width: 640, height: 480 },
     });
-
-    // Show local video
     localVideo.srcObject = localStream;
 
-    // Fetch ICE servers (includes TURN if configured on server)
-    const iceRes = await fetch("/api/ice-servers");
-    const iceServers = await iceRes.json();
+    // Create Daily room via our server
+    const res = await fetch("/api/create-room", { method: "POST" });
+    const { room_url, token, error } = await res.json();
+    if (error) throw new Error(error);
 
-    // Create WebRTC peer connection
-    pc = new RTCPeerConnection({ iceServers });
-
-    // Only add audio track to peer connection (video stays local-only)
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-      pc.addTrack(audioTrack, localStream);
-    }
-
-    // Handle remote audio from server (TTS output)
-    pc.ontrack = (event) => {
-      const remoteStream = event.streams[0] || new MediaStream([event.track]);
-      remoteAudio.srcObject = remoteStream;
-      setupAudioAnalysis(remoteStream);
-    };
-
-    // Create SDP offer and send immediately (don't wait for ICE gathering)
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    // Start session
-    const startRes = await fetch("/start", { method: "POST" });
-    const startData = await startRes.json();
-    sessionId = startData.session_id;
-
-    // Send offer to server
-    const offerRes = await fetch(`/sessions/${sessionId}/api/offer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sdp: pc.localDescription.sdp,
-        type: pc.localDescription.type,
-      }),
+    // Create Daily call object and join
+    callObject = DailyIframe.createCallObject({
+      audioSource: true,
+      videoSource: false,
     });
-    const answer = await offerRes.json();
-    pcId = answer.pc_id;
 
-    // Set remote description
-    await pc.setRemoteDescription(
-      new RTCSessionDescription({ sdp: answer.sdp, type: answer.type })
-    );
+    callObject.on("joined-meeting", () => {
+      console.log("Joined Daily room");
+    });
 
-    // Trickle ICE — send each candidate to the server as it's discovered
-    pc.onicecandidate = async (event) => {
-      if (event.candidate) {
-        try {
-          await fetch(`/sessions/${sessionId}/api/offer`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              pc_id: pcId,
-              candidates: [
-                {
-                  candidate: event.candidate.candidate,
-                  sdpMid: event.candidate.sdpMid,
-                  sdpMLineIndex: event.candidate.sdpMLineIndex,
-                },
-              ],
-            }),
-          });
-        } catch (err) {
-          console.warn("Failed to send ICE candidate:", err);
-        }
-      }
-    };
+    callObject.on("error", (e) => {
+      console.error("Daily error:", e);
+    });
+
+    callObject.on("left-meeting", () => {
+      console.log("Left Daily room");
+    });
+
+    await callObject.join({ url: room_url, token });
 
     // Connect WebSocket for transcript streaming
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${wsProtocol}//${location.host}/ws/transcripts`);
     ws.onmessage = handleMessage;
     ws.onclose = () => console.log("WebSocket closed");
-
-    // 30-second timeout — reset UI if WebRTC never connects
-    const connectTimeout = setTimeout(() => {
-      if (pc && pc.connectionState !== "connected") {
-        console.error("Connection timed out after 30s");
-        cleanup();
-        startBtn.disabled = false;
-        startBtn.textContent = "Start Meeting";
-        preConnect.classList.remove("hidden");
-        meetingEl.classList.add("hidden");
-        alert("Connection timed out. Please try again.");
-      }
-    }, 30000);
-
-    pc.onconnectionstatechange = () => {
-      if (pc && pc.connectionState === "connected") {
-        clearTimeout(connectTimeout);
-      }
-    };
 
     // Switch to meeting view
     connected = true;
@@ -159,52 +90,6 @@ async function connect() {
   }
 }
 
-// ── Audio analysis for orb ─────────────────────────────────
-
-function setupAudioAnalysis(stream) {
-  audioCtx = new AudioContext();
-  const source = audioCtx.createMediaStreamSource(stream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 256;
-  analyser.smoothingTimeConstant = 0.6;
-  source.connect(analyser);
-
-  const data = new Uint8Array(analyser.frequencyBinCount);
-
-  function tick() {
-    analyser.getByteFrequencyData(data);
-    let sum = 0;
-    for (let i = 0; i < data.length; i++) sum += data[i];
-    const level = sum / data.length / 255; // 0..1
-
-    // Drive orb scale and glow from audio level
-    const scale = 1 + level * 0.25;
-    const glow = 40 + level * 80;
-    agentOrb.style.transform = `scale(${scale})`;
-    agentOrb.style.boxShadow = `0 0 ${glow}px rgba(94, 200, 242, ${
-      0.25 + level * 0.4
-    }), 0 0 ${glow * 2}px rgba(94, 200, 242, ${
-      0.1 + level * 0.2
-    }), inset 0 0 30px rgba(0, 0, 0, 0.4)`;
-
-    // Update orb class based on audio activity
-    if (level > 0.02) {
-      if (!agentOrb.classList.contains("orb--speaking")) {
-        agentOrb.className = "orb orb--small orb--speaking";
-      }
-    } else {
-      if (agentOrb.classList.contains("orb--speaking")) {
-        agentOrb.className = "orb orb--small orb--listening";
-        agentOrb.style.transform = "";
-        agentOrb.style.boxShadow = "";
-      }
-    }
-
-    animFrame = requestAnimationFrame(tick);
-  }
-  tick();
-}
-
 // ── WebSocket message handler ──────────────────────────────
 
 function handleMessage(event) {
@@ -212,6 +97,7 @@ function handleMessage(event) {
 
   switch (msg.type) {
     case "transcript":
+      removePartialRow();
       addTranscriptRow(msg.data);
       updateCaption(msg.data.speaker, msg.data.text);
       if (msg.data.speaker === "user") {
@@ -220,6 +106,7 @@ function handleMessage(event) {
       break;
     case "partial":
       updateCaption("user", msg.data.text);
+      updatePartialRow(msg.data.text);
       break;
     case "notes":
       showNotes(msg.data);
@@ -230,9 +117,27 @@ function handleMessage(event) {
 // ── Transcript panel ───────────────────────────────────────
 
 function addTranscriptRow(data) {
+  const now = Date.now();
+  const isAgent = data.speaker === "agent";
+
+  if (
+    lastRow &&
+    lastRow.speaker === data.speaker &&
+    now - lastRow.ts < MERGE_WINDOW_MS
+  ) {
+    const textEl = lastRow.el.querySelector(".transcript-row__text");
+    textEl.textContent += " " + data.text;
+    lastRow.ts = now;
+
+    clearTimeout(mergeTimer);
+    mergeTimer = setTimeout(() => { lastRow = null; }, MERGE_WINDOW_MS);
+
+    transcriptPanel.scrollTop = transcriptPanel.scrollHeight;
+    return;
+  }
+
   const row = document.createElement("div");
   row.className = "transcript-row";
-  const isAgent = data.speaker === "agent";
   row.innerHTML = `
     <span class="transcript-row__time">${data.timestamp}</span>
     <span class="transcript-row__speaker ${
@@ -244,21 +149,46 @@ function addTranscriptRow(data) {
   `;
   transcriptPanel.appendChild(row);
   transcriptPanel.scrollTop = transcriptPanel.scrollHeight;
+
+  clearTimeout(mergeTimer);
+  lastRow = { el: row, speaker: data.speaker, ts: now };
+  mergeTimer = setTimeout(() => { lastRow = null; }, MERGE_WINDOW_MS);
 }
 
-// ── Caption bar ────────────────────────────────────────────
+// ── Partial transcript ─────────────────────────────────────
 
 function updateCaption(speaker, text) {
   captionSpeaker.textContent = speaker === "agent" ? "AI:" : "You:";
   captionText.textContent = text;
 }
 
+function updatePartialRow(text) {
+  let row = document.getElementById("partial-row");
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "partial-row";
+    row.className = "transcript-row transcript-row--partial";
+    transcriptPanel.appendChild(row);
+  }
+  row.innerHTML = `
+    <span class="transcript-row__time"></span>
+    <span class="transcript-row__speaker transcript-row__speaker--user">You</span>
+    <span class="transcript-row__text">${escapeHtml(text)}</span>
+  `;
+  transcriptPanel.scrollTop = transcriptPanel.scrollHeight;
+}
+
+function removePartialRow() {
+  const row = document.getElementById("partial-row");
+  if (row) row.remove();
+}
+
 // ── Controls ───────────────────────────────────────────────
 
 function toggleMic() {
-  if (!localStream) return;
+  if (!callObject) return;
   micEnabled = !micEnabled;
-  localStream.getAudioTracks().forEach((t) => (t.enabled = micEnabled));
+  callObject.setLocalAudio(micEnabled);
   micBtn.className = `control-btn ${
     micEnabled ? "control-btn--default" : "control-btn--muted"
   }`;
@@ -287,27 +217,18 @@ function endMeeting() {
   endBtn.textContent = "Generating notes...";
   stopTimer();
 
-  // Stop local tracks (triggers on_client_disconnected → note generation)
+  if (callObject) {
+    callObject.leave();
+    callObject.destroy();
+    callObject = null;
+  }
   if (localStream) {
     localStream.getTracks().forEach((t) => t.stop());
     localStream = null;
   }
-  if (pc) {
-    pc.close();
-    pc = null;
-  }
-  if (animFrame) {
-    cancelAnimationFrame(animFrame);
-    animFrame = null;
-  }
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
-  }
 
   connected = false;
 
-  // Show notes panel with loading state
   meetingEl.classList.add("hidden");
   notesPanel.classList.remove("hidden");
   notesEl.innerHTML = '<div class="loading">Generating meeting notes...</div>';
@@ -338,6 +259,8 @@ function resetToStart() {
   durationEl.textContent = "";
   endBtn.disabled = false;
   endBtn.textContent = "End Meeting";
+  lastRow = null;
+  clearTimeout(mergeTimer);
 }
 
 // ── Timer ──────────────────────────────────────────────────
@@ -362,25 +285,18 @@ function stopTimer() {
 // ── Cleanup ────────────────────────────────────────────────
 
 function cleanup() {
+  if (callObject) {
+    callObject.leave();
+    callObject.destroy();
+    callObject = null;
+  }
   if (localStream) {
     localStream.getTracks().forEach((t) => t.stop());
     localStream = null;
   }
-  if (pc) {
-    pc.close();
-    pc = null;
-  }
   if (ws) {
     ws.close();
     ws = null;
-  }
-  if (animFrame) {
-    cancelAnimationFrame(animFrame);
-    animFrame = null;
-  }
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
   }
   connected = false;
   stopTimer();

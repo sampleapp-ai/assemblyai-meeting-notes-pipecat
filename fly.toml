@@ -3,6 +3,7 @@ primary_region = "iad"
 
 [deploy]
   max_per_region = 1
+  strategy = "immediate"
 
 [build]
 
@@ -11,7 +12,19 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 50
+    soft_limit = 25
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/client/"
 
 [[vm]]
   memory = "2gb"

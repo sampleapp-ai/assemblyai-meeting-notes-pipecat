@@ -251,25 +251,33 @@ body {
 .caption-bar {
   width: 100%;
   max-width: 720px;
-  padding: 8px 16px;
-  background: rgba(0, 0, 0, 0.7);
-  border-radius: 8px;
-  backdrop-filter: blur(8px);
-  min-height: 36px;
-  display: flex;
-  align-items: center;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
 }
 
 .caption-bar__text {
-  font-size: 13px;
-  color: #e2e8f0;
-  line-height: 1.4;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 .caption-bar__speaker {
   font-weight: 600;
-  color: #67e8f9;
   margin-right: 6px;
+  color: var(--accent);
+}
+
+/* ── Partial transcript row ─────────────────────────────── */
+
+.transcript-row--partial .transcript-row__text {
+  color: #71717a;
+  font-style: italic;
+}
+
+.transcript-row--partial .transcript-row__speaker {
+  color: #71717a;
 }
 
 /* ── Transcript Panel ───────────────────────────────────── */

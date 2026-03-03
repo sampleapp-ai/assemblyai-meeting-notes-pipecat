@@ -1,4 +1,4 @@
-pipecat-ai[assemblyai,cerebras,rime,silero,daily,webrtc]
+pipecat-ai[assemblyai,cerebras,silero,daily,webrtc]
 python-dotenv
 fastapi
 uvicorn
